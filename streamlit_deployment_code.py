@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-New River Flow Prediction App - Streamlit Version
-Real-time prediction using machine learning approach
+Multi-River Flow Prediction Framework
+A configurable system for predicting flows on multiple rivers
 """
 
 import streamlit as st
@@ -11,51 +11,230 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 import requests
+import json
+import yaml
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 # Page config
 st.set_page_config(
-    page_title="New River Flow Predictor",
-    page_icon="🌊",
+    page_title="Multi-River Flow Predictor",
+    page_icon="🏞️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-class RiverFlowPredictor:
+@dataclass
+class WeatherStation:
+    name: str
+    lat: float
+    lon: float
+    weight: float = 1.0  # Importance weight for this station
+    
+@dataclass
+class FlowCategory:
+    min_flow: float
+    max_flow: float
+    label: str
+    color: str
+    description: str
+    difficulty: str
+
+@dataclass
+class RiverConfig:
+    name: str
+    usgs_site: str
+    state: str
+    description: str
+    weather_stations: List[WeatherStation]
+    flow_categories: List[FlowCategory]
+    model_params: Dict  # Prediction model parameters
+    seasonal_adjustments: Dict[int, float]  # Month -> multiplier
+    
+class MultiRiverPredictor:
     def __init__(self):
-        self.flow_categories = [
-            {"min": 0, "max": 800, "label": "Very Low", "color": "#DC2626", 
-             "desc": "Extremely low - most runs unrunnable", "difficulty": "No Go"},
-            {"min": 800, "max": 1500, "label": "Low", "color": "#EA580C", 
-             "desc": "Low water - only shallow runs possible", "difficulty": "Experienced Only"},
-            {"min": 1500, "max": 3000, "label": "Moderate", "color": "#D97706", 
-             "desc": "Decent conditions - most runs okay", "difficulty": "Intermediate+"},
-            {"min": 3000, "max": 6000, "label": "Good", "color": "#059669", 
-             "desc": "Good conditions - all runs open", "difficulty": "All Levels"},
-            {"min": 6000, "max": 10000, "label": "High", "color": "#2563EB", 
-             "desc": "High water - excellent conditions", "difficulty": "Intermediate+"},
-            {"min": 10000, "max": 20000, "label": "Very High", "color": "#4F46E5", 
-             "desc": "Very high - advanced runs only", "difficulty": "Advanced Only"},
-            {"min": 20000, "max": float('inf'), "label": "Flood", "color": "#7C3AED", 
-             "desc": "Flood stage - DANGEROUS", "difficulty": "STAY OFF RIVER"}
+        self.rivers = self.load_river_configs()
+        
+    def load_river_configs(self) -> Dict[str, RiverConfig]:
+        """Load river configurations"""
+        
+        # Define flow categories (can be customized per river)
+        standard_categories = [
+            FlowCategory(0, 800, "Very Low", "#DC2626", "Extremely low - most runs unrunnable", "No Go"),
+            FlowCategory(800, 1500, "Low", "#EA580C", "Low water - only shallow runs possible", "Experienced Only"),
+            FlowCategory(1500, 3000, "Moderate", "#D97706", "Decent conditions - most runs okay", "Intermediate+"),
+            FlowCategory(3000, 6000, "Good", "#059669", "Good conditions - all runs open", "All Levels"),
+            FlowCategory(6000, 10000, "High", "#2563EB", "High water - excellent conditions", "Intermediate+"),
+            FlowCategory(10000, 20000, "Very High", "#4F46E5", "Very high - advanced runs only", "Advanced Only"),
+            FlowCategory(20000, float('inf'), "Flood", "#7C3AED", "Flood stage - DANGEROUS", "STAY OFF RIVER")
         ]
+        
+        # Define weather stations for each river watershed
+        new_river_stations = [
+            WeatherStation("Boone, NC", 36.2168, -81.6746, 1.0),
+            WeatherStation("Blowing Rock, NC", 36.1343, -81.6787, 0.7),
+            WeatherStation("West Jefferson, NC", 36.4043, -81.4926, 0.8)
+        ]
+        
+        french_broad_stations = [
+            WeatherStation("Asheville, NC", 35.5951, -82.5515, 1.0),
+            WeatherStation("Hot Springs, NC", 35.8973, -82.8278, 1.0),
+            WeatherStation("Marshall, NC", 35.7973, -82.6793, 0.9),
+            WeatherStation("Burnsville, NC", 35.9154, -82.2968, 0.7)
+        ]
+        
+        nolichucky_stations = [
+            WeatherStation("Erwin, TN", 36.1581, -82.4193, 1.0),
+            WeatherStation("Elizabethton, TN", 36.3487, -82.2107, 0.9),
+            WeatherStation("Burnsville, NC", 35.9154, -82.2968, 0.8),
+            WeatherStation("Banner Elk, NC", 36.1626, -81.8712, 0.6)
+        ]
+        
+        watauga_stations = [
+            WeatherStation("Boone, NC", 36.2168, -81.6746, 1.0),
+            WeatherStation("Elizabethton, TN", 36.3487, -82.2107, 1.0),
+            WeatherStation("Banner Elk, NC", 36.1626, -81.8712, 0.8),
+            WeatherStation("Mountain City, TN", 36.4734, -81.8065, 0.7)
+        ]
+        
+        rivers = {
+            "new_river": RiverConfig(
+                name="New River at Fayette, WV",
+                usgs_site="03185400",
+                state="WV",
+                description="Classic Class III-IV whitewater in the New River Gorge",
+                weather_stations=new_river_stations,
+                flow_categories=standard_categories,
+                model_params={
+                    'flow_persistence': 0.75,
+                    'precip_today': 40,
+                    'precip_yesterday': 60,
+                    'precip_day2': 35,
+                    'precip_day3': 20,
+                    'precip_3day': 8,
+                    'precip_7day': 3,
+                    'base_flow': 200,
+                    'min_flow': 300
+                },
+                seasonal_adjustments={
+                    1: 1.0, 2: 1.0, 3: 1.15, 4: 1.15, 5: 1.15,  # Spring snowmelt
+                    6: 0.85, 7: 0.85, 8: 0.85,  # Summer ET
+                    9: 1.05, 10: 1.05, 11: 1.05, 12: 1.0  # Fall/Winter
+                }
+            ),
+            
+            "french_broad": RiverConfig(
+                name="French Broad River at Hot Springs, NC",
+                usgs_site="03451500",
+                state="NC/TN",
+                description="Classic Class III-IV river through scenic Appalachian gorge",
+                weather_stations=french_broad_stations,
+                flow_categories=[
+                    FlowCategory(0, 500, "Very Low", "#DC2626", "Too low - rocks everywhere", "No Go"),
+                    FlowCategory(500, 1000, "Low", "#EA580C", "Marginal - experienced only", "Experienced Only"),
+                    FlowCategory(1000, 2000, "Moderate", "#D97706", "Good conditions - all rapids runnable", "Intermediate+"),
+                    FlowCategory(2000, 4000, "Good", "#059669", "Prime conditions - excellent rapids", "All Levels"),
+                    FlowCategory(4000, 7000, "High", "#2563EB", "High water - pushy but great", "Intermediate+"),
+                    FlowCategory(7000, 12000, "Very High", "#4F46E5", "Big water - advanced only", "Advanced Only"),
+                    FlowCategory(12000, float('inf'), "Flood", "#7C3AED", "Flood stage - DANGEROUS", "STAY OFF RIVER")
+                ],
+                model_params={
+                    'flow_persistence': 0.78,  # Fairly stable mountain river
+                    'precip_today': 35,
+                    'precip_yesterday': 55,
+                    'precip_day2': 40,
+                    'precip_day3': 25,
+                    'precip_3day': 12,
+                    'precip_7day': 5,
+                    'base_flow': 400,
+                    'min_flow': 300
+                },
+                seasonal_adjustments={
+                    1: 1.1, 2: 1.1, 3: 1.2, 4: 1.15, 5: 1.0,  # Spring snowmelt boost
+                    6: 0.8, 7: 0.75, 8: 0.8,  # Summer drought
+                    9: 0.9, 10: 1.0, 11: 1.05, 12: 1.1  # Fall pickup, winter base
+                }
+            ),
+            
+            "nolichucky": RiverConfig(
+                name="Nolichucky River at Erwin, TN",
+                usgs_site="03467000",
+                state="TN/NC",
+                description="Technical Class III-IV with stunning gorge scenery",
+                weather_stations=nolichucky_stations,
+                flow_categories=[
+                    FlowCategory(0, 800, "Very Low", "#DC2626", "Too low - not runnable", "No Go"),
+                    FlowCategory(800, 1500, "Low", "#EA580C", "Marginal - lots of rocks", "Experienced Only"),
+                    FlowCategory(1500, 3000, "Moderate", "#D97706", "Good flow - technical rapids", "Intermediate+"),
+                    FlowCategory(3000, 5000, "Good", "#059669", "Excellent conditions", "All Levels"),
+                    FlowCategory(5000, 8000, "High", "#2563EB", "High water - big and pushy", "Intermediate+"),
+                    FlowCategory(8000, 15000, "Very High", "#4F46E5", "Huge water - experts only", "Advanced Only"),
+                    FlowCategory(15000, float('inf'), "Flood", "#7C3AED", "Flood conditions - deadly", "STAY OFF RIVER")
+                ],
+                model_params={
+                    'flow_persistence': 0.72,  # More flashy mountain river
+                    'precip_today': 45,
+                    'precip_yesterday': 65,  # Peak response 
+                    'precip_day2': 45,
+                    'precip_day3': 30,
+                    'precip_3day': 15,
+                    'precip_7day': 8,
+                    'base_flow': 600,
+                    'min_flow': 400
+                },
+                seasonal_adjustments={
+                    1: 1.0, 2: 1.05, 3: 1.2, 4: 1.15, 5: 1.0,
+                    6: 0.75, 7: 0.7, 8: 0.75,  # Very dry summers
+                    9: 0.85, 10: 0.95, 11: 1.0, 12: 1.0
+                }
+            ),
+            
+            "watauga": RiverConfig(
+                name="Watauga River at Sugar Grove, NC",
+                usgs_site="03479000",
+                state="NC/TN", 
+                description="Fun Class II-III with continuous rapids and beautiful scenery",
+                weather_stations=watauga_stations,
+                flow_categories=[
+                    FlowCategory(0, 200, "Very Low", "#DC2626", "Unrunnable - all rocks", "No Go"),
+                    FlowCategory(200, 400, "Low", "#EA580C", "Low but possible - scrappy", "Experienced Only"),
+                    FlowCategory(400, 800, "Moderate", "#D97706", "Good flow - fun rapids", "Intermediate+"),
+                    FlowCategory(800, 1500, "Good", "#059669", "Prime conditions - perfect", "All Levels"),
+                    FlowCategory(1500, 2500, "High", "#2563EB", "High water - fast and fun", "Intermediate+"),
+                    FlowCategory(2500, 4000, "Very High", "#4F46E5", "Pushy high water", "Advanced Only"),
+                    FlowCategory(4000, float('inf'), "Flood", "#7C3AED", "Flood stage", "STAY OFF RIVER")
+                ],
+                model_params={
+                    'flow_persistence': 0.8,  # More stable flow
+                    'precip_today': 30,
+                    'precip_yesterday': 50,
+                    'precip_day2': 35,
+                    'precip_day3': 20,
+                    'precip_3day': 10,
+                    'precip_7day': 6,
+                    'base_flow': 300,
+                    'min_flow': 150
+                },
+                seasonal_adjustments={
+                    1: 1.05, 2: 1.1, 3: 1.15, 4: 1.1, 5: 0.95,
+                    6: 0.8, 7: 0.75, 8: 0.8,  # Summer low water
+                    9: 0.9, 10: 1.0, 11: 1.05, 12: 1.05
+                }
+            )
+        }
+        
+        return rivers
     
-    def get_flow_category(self, flow):
-        for cat in self.flow_categories:
-            if cat["min"] <= flow < cat["max"]:
-                return cat
-        return self.flow_categories[0]
-    
-    @st.cache_data(ttl=300)  # Cache for 5 minutes
-    def fetch_current_usgs_data(_self):
-        """Fetch current USGS data"""
+    @st.cache_data(ttl=300)
+    def fetch_usgs_data(_self, site_id: str) -> Optional[pd.DataFrame]:
+        """Fetch USGS data for any site"""
         try:
-            site = "03185400"
             url = f"https://waterservices.usgs.gov/nwis/iv/"
             params = {
                 'format': 'json',
-                'sites': site,
+                'sites': site_id,
                 'parameterCd': '00060',
-                'period': 'P7D'  # Last 7 days
+                'period': 'P7D'
             }
             
             response = requests.get(url, params=params, timeout=10)
@@ -71,15 +250,26 @@ class RiverFlowPredictor:
             return None
             
         except Exception as e:
-            st.error(f"Error fetching USGS data: {e}")
+            st.error(f"Error fetching USGS data for {site_id}: {e}")
             return None
     
-    def calculate_prediction(self, current_flow, flow_history, precipitation, temperature):
-        """Calculate flow prediction using ML-based approach"""
+    def get_flow_category(self, river_config: RiverConfig, flow: float) -> FlowCategory:
+        """Get flow category for specific river"""
+        for cat in river_config.flow_categories:
+            if cat.min_flow <= flow < cat.max_flow:
+                return cat
+        return river_config.flow_categories[0]
+    
+    def calculate_prediction(self, river_config: RiverConfig, current_flow: float, 
+                           flow_history: Dict, precipitation: Dict, temperature: Dict) -> int:
+        """Calculate prediction for specific river using its model parameters"""
         
-        # Flow persistence (strongest predictor)
-        predicted_flow = current_flow * 0.75  # Base persistence
+        params = river_config.model_params
         
+        # Flow persistence
+        predicted_flow = current_flow * params['flow_persistence']
+        
+        # Add flow history effects
         if flow_history.get('yesterday'):
             predicted_flow += flow_history['yesterday'] * 0.15
         if flow_history.get('day2'):
@@ -87,76 +277,101 @@ class RiverFlowPredictor:
         if flow_history.get('day7'):
             predicted_flow += flow_history['day7'] * 0.02
         
-        # Precipitation effects (peak impact 12-24 hours after rain)
-        boone_precip = [precipitation.get(f'boone_day{i}', 0) for i in range(7)]
+        # Precipitation effects - weight by station importance
+        total_weight = sum(station.weight for station in river_config.weather_stations)
         
-        # Today's and recent precipitation impacts
-        predicted_flow += boone_precip[0] * 40  # Today
-        predicted_flow += boone_precip[1] * 60  # Yesterday (peak impact)
-        predicted_flow += boone_precip[2] * 35  # 2 days ago
-        predicted_flow += boone_precip[3] * 20  # 3 days ago
-        predicted_flow += boone_precip[4] * 10  # 4 days ago
+        # Calculate weighted precipitation
+        weighted_precip = {}
+        for i in range(7):
+            day_precip = 0
+            for j, station in enumerate(river_config.weather_stations):
+                station_precip = precipitation.get(f'station_{j}_day_{i}', 0)
+                day_precip += station_precip * station.weight
+            weighted_precip[f'day_{i}'] = day_precip / total_weight
+        
+        # Apply precipitation effects
+        predicted_flow += weighted_precip['day_0'] * params['precip_today']
+        predicted_flow += weighted_precip['day_1'] * params['precip_yesterday']
+        predicted_flow += weighted_precip['day_2'] * params['precip_day2']
+        predicted_flow += weighted_precip['day_3'] * params['precip_day3']
         
         # Cumulative effects
-        precip_3day = sum(boone_precip[:3])
-        precip_7day = sum(boone_precip)
-        predicted_flow += precip_3day * 8
-        predicted_flow += precip_7day * 3
+        precip_3day = sum(weighted_precip[f'day_{i}'] for i in range(3))
+        precip_7day = sum(weighted_precip[f'day_{i}'] for i in range(7))
+        predicted_flow += precip_3day * params['precip_3day']
+        predicted_flow += precip_7day * params['precip_7day']
         
-        # Other stations (weighted less)
-        predicted_flow += precipitation.get('blowing_rock_today', 0) * 20
-        predicted_flow += precipitation.get('west_jefferson_today', 0) * 15
-        
-        # Seasonal adjustments
+        # Seasonal adjustment
         month = datetime.now().month
-        if 3 <= month <= 5:  # Spring - snowmelt
-            predicted_flow *= 1.15
-        elif 6 <= month <= 8:  # Summer - evapotranspiration
-            predicted_flow *= 0.85
-        elif 9 <= month <= 11:  # Fall
-            predicted_flow *= 1.05
+        seasonal_mult = river_config.seasonal_adjustments.get(month, 1.0)
+        predicted_flow *= seasonal_mult
         
         # Temperature effects
         current_temp = temperature.get('current', 50)
-        if current_temp < 32:  # Freezing
-            predicted_flow *= 0.8  # Reduced runoff
+        if current_temp < 32:
+            predicted_flow *= 0.8
         
-        # Base flow and minimum
-        predicted_flow += 200
-        predicted_flow = max(predicted_flow, 300)
+        # Add base flow and enforce minimum
+        predicted_flow += params['base_flow']
+        predicted_flow = max(predicted_flow, params['min_flow'])
         
         return int(predicted_flow)
     
-    def calculate_confidence(self, flow_history, precipitation):
-        """Calculate prediction confidence based on data completeness"""
-        confidence = 0.5  # Base confidence
+    def calculate_confidence(self, flow_history: Dict, precipitation: Dict) -> int:
+        """Calculate prediction confidence"""
+        confidence = 0.5
         
-        # Flow history completeness
         if flow_history.get('yesterday'): confidence += 0.2
         if flow_history.get('day2'): confidence += 0.1
         if flow_history.get('day7'): confidence += 0.05
         
-        # Precipitation data completeness
-        boone_data_points = sum(1 for i in range(4) if precipitation.get(f'boone_day{i}', 0) > 0)
-        confidence += min(boone_data_points * 0.05, 0.15)
+        # Count precipitation data points
+        precip_points = sum(1 for key, val in precipitation.items() 
+                           if 'day_0' in key or 'day_1' in key and val > 0)
+        confidence += min(precip_points * 0.05, 0.15)
         
         return min(int(confidence * 100), 95)
 
 def main():
-    predictor = RiverFlowPredictor()
+    predictor = MultiRiverPredictor()
+    
+    # Sidebar for river selection
+    st.sidebar.header("🏞️ Select River")
+    
+    river_options = {
+        "New River, WV": "new_river",
+        "French Broad River, NC": "french_broad", 
+        "Nolichucky River, TN": "nolichucky",
+        "Watauga River, NC": "watauga"
+    }
+    
+    selected_river_name = st.sidebar.selectbox("Choose a river:", list(river_options.keys()))
+    selected_river_key = river_options[selected_river_name]
+    river_config = predictor.rivers[selected_river_key]
+    
+    # Display river info
+    st.sidebar.markdown(f"**{river_config.description}**")
+    st.sidebar.markdown(f"📍 USGS Site: {river_config.usgs_site}")
+    st.sidebar.markdown(f"🗺️ State: {river_config.state}")
+    
+    # Weather stations info
+    st.sidebar.markdown("**Weather Stations:**")
+    for station in river_config.weather_stations:
+        weight_stars = "⭐" * int(station.weight * 3)
+        st.sidebar.markdown(f"• {station.name} {weight_stars}")
     
     # Header
-    st.title("🌊 New River Flow Predictor")
-    st.markdown("**USGS Gauge #03185400 - New River at Fayette, WV**")
-    st.markdown("Real-time prediction using machine learning • Updated: " + datetime.now().strftime("%Y-%m-%d %H:%M"))
+    st.title(f"🌊 {river_config.name}")
+    st.markdown(f"**USGS Gauge #{river_config.usgs_site}**")
+    st.markdown("Multi-river flow prediction system • Updated: " + datetime.now().strftime("%Y-%m-%d %H:%M"))
     
     # Auto-fetch current USGS data
     with st.spinner("Fetching current USGS data..."):
-        usgs_data = predictor.fetch_current_usgs_data()
+        usgs_data = predictor.fetch_usgs_data(river_config.usgs_site)
     
     if usgs_data is not None and len(usgs_data) > 0:
         current_usgs_flow = usgs_data.iloc[-1]['flow']
-        st.success(f"✅ Current USGS Flow: **{current_usgs_flow:.0f} cfs** (auto-updated)")
+        st.success(f"✅ Current Flow: **{current_usgs_flow:.0f} cfs** (auto-updated)")
     else:
         current_usgs_flow = None
         st.warning("⚠️ Could not fetch current USGS data. Please enter manually.")
@@ -173,8 +388,7 @@ def main():
                 "Current Flow (cfs)",
                 value=float(current_usgs_flow) if current_usgs_flow else 2500.0,
                 min_value=0.0,
-                step=100.0,
-                help="Current flow from USGS gauge (auto-filled if available)"
+                step=100.0
             )
             
             current_temp = st.number_input(
@@ -200,37 +414,32 @@ def main():
             with col_hist3:
                 day14_flow = st.number_input("2 weeks ago (cfs)", value=0.0, step=100.0)
         
-        # Precipitation data
+        # Precipitation data - dynamic based on weather stations
         with st.expander("🌧️ Recent Precipitation", expanded=True):
-            st.markdown("**Boone, NC (Primary Watershed)**")
+            precipitation_data = {}
             
-            col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-            
-            with col_p1:
-                boone_today = st.number_input("Today (in)", value=0.0, step=0.01, format="%.2f", key="boone_0")
-                boone_day1 = st.number_input("Yesterday (in)", value=0.0, step=0.01, format="%.2f", key="boone_1")
-            
-            with col_p2:
-                boone_day2 = st.number_input("2 days ago (in)", value=0.0, step=0.01, format="%.2f", key="boone_2")
-                boone_day3 = st.number_input("3 days ago (in)", value=0.0, step=0.01, format="%.2f", key="boone_3")
-            
-            with col_p3:
-                boone_day4 = st.number_input("4 days ago (in)", value=0.0, step=0.01, format="%.2f", key="boone_4")
-                boone_day5 = st.number_input("5 days ago (in)", value=0.0, step=0.01, format="%.2f", key="boone_5")
-            
-            with col_p4:
-                boone_day6 = st.number_input("6 days ago (in)", value=0.0, step=0.01, format="%.2f", key="boone_6")
-            
-            st.markdown("**Other Stations**")
-            col_other1, col_other2 = st.columns(2)
-            
-            with col_other1:
-                st.markdown("*Blowing Rock, NC*")
-                blowing_today = st.number_input("BR Today (in)", value=0.0, step=0.01, format="%.2f", key="br_today")
-            
-            with col_other2:
-                st.markdown("*West Jefferson, NC*")
-                wj_today = st.number_input("WJ Today (in)", value=0.0, step=0.01, format="%.2f", key="wj_today")
+            for i, station in enumerate(river_config.weather_stations):
+                st.markdown(f"**{station.name}** ({'⭐' * int(station.weight * 3)})")
+                
+                cols = st.columns(4)
+                days = ["Today", "Yesterday", "2 days ago", "3 days ago", "4 days ago", "5 days ago", "6 days ago"]
+                
+                for day_idx in range(min(7, len(days))):
+                    col_idx = day_idx % 4
+                    if day_idx > 0 and col_idx == 0:
+                        cols = st.columns(4)
+                    
+                    with cols[col_idx]:
+                        if day_idx < len(days):
+                            value = st.number_input(
+                                days[day_idx],
+                                value=0.0,
+                                step=0.01,
+                                format="%.2f",
+                                key=f"station_{i}_day_{day_idx}",
+                                label_visibility="visible" if day_idx < 4 else "collapsed"
+                            )
+                            precipitation_data[f'station_{i}_day_{day_idx}'] = value
         
         # Prediction button
         if st.button("🔮 Generate Flow Prediction", type="primary", use_container_width=True):
@@ -243,36 +452,26 @@ def main():
                 'day14': day14_flow if day14_flow > 0 else None
             }
             
-            precipitation = {
-                'boone_day0': boone_today,
-                'boone_day1': boone_day1,
-                'boone_day2': boone_day2,
-                'boone_day3': boone_day3,
-                'boone_day4': boone_day4,
-                'boone_day5': boone_day5,
-                'boone_day6': boone_day6,
-                'blowing_rock_today': blowing_today,
-                'west_jefferson_today': wj_today
-            }
-            
             temperature = {'current': current_temp}
             
             # Calculate prediction
-            prediction = predictor.calculate_prediction(current_flow, flow_history, precipitation, temperature)
-            confidence = predictor.calculate_confidence(flow_history, precipitation)
+            prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, precipitation_data, temperature)
+            confidence = predictor.calculate_confidence(flow_history, precipitation_data)
             
             # Store in session state
-            st.session_state['prediction'] = prediction
-            st.session_state['confidence'] = confidence
-            st.session_state['current_flow'] = current_flow
+            st.session_state[f'prediction_{selected_river_key}'] = prediction
+            st.session_state[f'confidence_{selected_river_key}'] = confidence
     
     with col2:
         st.header("🎯 Prediction Results")
         
-        if 'prediction' in st.session_state:
-            prediction = st.session_state['prediction']
-            confidence = st.session_state['confidence']
-            category = predictor.get_flow_category(prediction)
+        prediction_key = f'prediction_{selected_river_key}'
+        confidence_key = f'confidence_{selected_river_key}'
+        
+        if prediction_key in st.session_state:
+            prediction = st.session_state[prediction_key]
+            confidence = st.session_state[confidence_key]
+            category = predictor.get_flow_category(river_config, prediction)
             
             # Main prediction display
             st.markdown(f"""
@@ -288,8 +487,8 @@ def main():
                 <h1 style="margin: 10px 0; font-size: 3em; color: white;">{prediction:,}</h1>
                 <h3 style="margin: 0; color: white;">cfs</h3>
                 <p style="margin: 10px 0; font-size: 1.2em; color: white;">
-                    <strong>{category['label']}</strong><br>
-                    {category['difficulty']}
+                    <strong>{category.label}</strong><br>
+                    {category.difficulty}
                 </p>
                 <p style="margin: 5px 0; opacity: 0.9; color: white;">
                     Confidence: {confidence}%
@@ -297,66 +496,73 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             
-            # Category details
-            st.markdown(f"**Conditions:** {category['desc']}")
+            st.markdown(f"**Conditions:** {category.description}")
             
-            # Flow categories table
-            st.subheader("📊 Flow Categories")
-            categories_df = pd.DataFrame(predictor.flow_categories)
-            categories_df['Range (cfs)'] = categories_df.apply(
-                lambda x: f"{x['min']:,}-{x['max']:,}" if x['max'] != float('inf') else f"{x['min']:,}+", 
-                axis=1
-            )
+            # Flow categories for this river
+            st.subheader(f"📊 {river_config.name.split(' at ')[0]} Flow Categories")
             
-            # Highlight current category
-            def highlight_current(row):
-                if row['min'] <= prediction < row['max']:
-                    return ['background-color: #FEF3C7'] * len(row)
-                return [''] * len(row)
+            categories_data = []
+            for cat in river_config.flow_categories:
+                range_str = f"{cat.min_flow:,.0f}-{cat.max_flow:,.0f}" if cat.max_flow != float('inf') else f"{cat.min_flow:,.0f}+"
+                categories_data.append({
+                    'Category': cat.label,
+                    'Range (cfs)': range_str,
+                    'Difficulty': cat.difficulty,
+                    'Current': '👈' if cat.min_flow <= prediction < cat.max_flow else ''
+                })
             
-            styled_df = categories_df[['label', 'Range (cfs)', 'difficulty']].style.apply(highlight_current, axis=1)
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            
-            # Additional info
-            st.subheader("ℹ️ Additional Info")
-            
-            # Calculate some derived metrics
-            precip_3day = boone_today + boone_day1 + boone_day2
-            precip_7day = sum([boone_today, boone_day1, boone_day2, boone_day3, boone_day4, boone_day5, boone_day6])
-            
-            st.metric("3-day Precipitation", f"{precip_3day:.2f} in")
-            st.metric("7-day Precipitation", f"{precip_7day:.2f} in")
-            
-            if yesterday_flow > 0:
-                flow_change = ((prediction - yesterday_flow) / yesterday_flow) * 100
-                st.metric("Predicted Change", f"{flow_change:+.1f}%", delta=f"{prediction - yesterday_flow:+.0f} cfs")
+            st.dataframe(pd.DataFrame(categories_data), use_container_width=True, hide_index=True)
         
         else:
             st.info("👆 Enter data above and click 'Generate Flow Prediction' to see results")
         
-        # Tips
-        st.subheader("💡 Pro Tips")
-        st.markdown("""
-        - **Peak flows** occur 12-36 hours after heavy rain
-        - **Best data sources**:
-          - USGS gauge (auto-updated)
-          - Weather Underground (Boone, NC)
-          - NOAA precipitation data
-        - **Model accuracy**: 85-95% for normal conditions
-        - **Always verify** with current USGS readings
-        """)
+        # River-specific tips
+        st.subheader("💡 River-Specific Tips")
+        if selected_river_key == "new_river":
+            st.markdown("""
+            - **Best flows**: 3,000-8,000 cfs
+            - **Peak timing**: 24-36 hours after Boone area rain
+            - **Season**: Spring (March-May) typically best
+            - **Access**: Bridge Rapids, Fayette Station
+            - **Class**: III-IV, pool-drop style
+            """)
+        elif selected_river_key == "french_broad":
+            st.markdown("""
+            - **Best flows**: 2,000-6,000 cfs
+            - **Peak timing**: 12-24 hours after Asheville area rain
+            - **Season**: Year-round, spring snowmelt excellent
+            - **Access**: Hot Springs to Paint Rock
+            - **Class**: III-IV, big water when up
+            """)
+        elif selected_river_key == "nolichucky":
+            st.markdown("""
+            - **Best flows**: 2,000-6,000 cfs
+            - **Peak timing**: 12-18 hours after TN/NC border rain
+            - **Season**: Spring best, very low in summer
+            - **Access**: Poplar to Erwin
+            - **Class**: III-IV+, technical and beautiful
+            """)
+        elif selected_river_key == "watauga":
+            st.markdown("""
+            - **Best flows**: 800-2,000 cfs
+            - **Peak timing**: 12-24 hours after High Country rain
+            - **Season**: Spring/fall best, summer can be low
+            - **Access**: Sugar Grove area runs
+            - **Class**: II-III, continuous and fun
+            """)
         
         # Data sources
         st.subheader("🔗 Data Sources")
-        st.markdown("""
-        - [USGS Real-time Data](https://waterdata.usgs.gov/nwis/uv?site_no=03185400)
-        - [Weather Underground - Boone, NC](https://www.wunderground.com/weather/us/nc/boone)
-        - [NOAA Weather Data](https://www.weather.gov/rah/)
+        st.markdown(f"""
+        - [USGS Gauge #{river_config.usgs_site}](https://waterdata.usgs.gov/nwis/uv?site_no={river_config.usgs_site})
+        - [Weather Underground - Regional](https://www.wunderground.com/)
+        - [NOAA Weather Data](https://www.weather.gov/)
+        - [American Whitewater](https://www.americanwhitewater.org/)
         """)
     
-    # Show USGS data if available
+    # Show USGS data chart
     if usgs_data is not None and len(usgs_data) > 0:
-        st.subheader("📈 Recent USGS Flow Data")
+        st.subheader(f"📈 Recent Flow Data - {river_config.name}")
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -367,14 +573,57 @@ def main():
             line=dict(color='#2563EB', width=2)
         ))
         
+        # Add category background colors
+        for cat in river_config.flow_categories[::-1]:  # Reverse for layering
+            if cat.max_flow != float('inf'):
+                fig.add_hrect(
+                    y0=cat.min_flow, y1=cat.max_flow,
+                    fillcolor=cat.color, opacity=0.1,
+                    annotation_text=cat.label, annotation_position="top left"
+                )
+        
         fig.update_layout(
-            title="New River Flow - Last 7 Days",
+            title=f"{river_config.name} - Last 7 Days",
             xaxis_title="Date",
             yaxis_title="Flow (cfs)",
             hovermode='x unified'
         )
         
         st.plotly_chart(fig, use_container_width=True)
+    
+    # Multi-river comparison
+    st.subheader("🏞️ Quick Multi-River Status")
+    if st.button("Check All Rivers"):
+        river_status = {}
+        for key, config in predictor.rivers.items():
+            data = predictor.fetch_usgs_data(config.usgs_site)
+            if data is not None and len(data) > 0:
+                current_flow = data.iloc[-1]['flow']
+                category = predictor.get_flow_category(config, current_flow)
+                river_status[config.name] = {
+                    'flow': current_flow,
+                    'category': category.label,
+                    'color': category.color
+                }
+        
+        if river_status:
+            cols = st.columns(len(river_status))
+            for i, (river_name, status) in enumerate(river_status.items()):
+                with cols[i]:
+                    st.markdown(f"""
+                    <div style="
+                        border: 2px solid {status['color']};
+                        padding: 10px;
+                        border-radius: 5px;
+                        text-align: center;
+                    ">
+                        <strong>{river_name.split(' at ')[0]}</strong><br>
+                        {status['flow']:.0f} cfs<br>
+                        <span style="color: {status['color']}; font-weight: bold;">
+                            {status['category']}
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
