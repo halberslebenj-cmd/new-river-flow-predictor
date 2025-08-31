@@ -224,8 +224,96 @@ class MultiRiverPredictor:
         
         return rivers
     
-    @st.cache_data(ttl=300)
-    def fetch_usgs_data(_self, site_id: str) -> Optional[pd.DataFrame]:
+    @st.cache_data(ttl=1800)  # Cache for 30 minutes
+    def fetch_weather_data(_self, stations: List[WeatherStation], days_back: int = 7) -> Dict:
+        """Fetch weather data from Open-Meteo API for multiple stations"""
+        weather_data = {}
+        
+        for i, station in enumerate(stations):
+            try:
+                # Open-Meteo API (free, no API key needed)
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days_back)
+                
+                url = "https://api.open-meteo.com/v1/forecast"
+                params = {
+                    'latitude': station.lat,
+                    'longitude': station.lon,
+                    'daily': ['precipitation_sum', 'temperature_2m_mean', 'temperature_2m_min', 'temperature_2m_max'],
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'timezone': 'America/New_York',
+                    'temperature_unit': 'fahrenheit',
+                    'precipitation_unit': 'inch'
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'daily' in data:
+                    daily = data['daily']
+                    dates = [datetime.fromisoformat(date).date() for date in daily['time']]
+                    
+                    # Store data for each day
+                    for day_idx in range(min(days_back, len(dates))):
+                        day_key = f'station_{i}_day_{day_idx}'
+                        
+                        # Precipitation (reverse order so day_0 is today, day_1 is yesterday)
+                        precip_idx = len(dates) - 1 - day_idx
+                        if precip_idx >= 0 and precip_idx < len(daily.get('precipitation_sum', [])):
+                            precip_value = daily['precipitation_sum'][precip_idx]
+                            weather_data[day_key] = precip_value if precip_value is not None else 0.0
+                        else:
+                            weather_data[day_key] = 0.0
+                    
+                    # Current temperature (most recent)
+                    if daily.get('temperature_2m_mean') and len(daily['temperature_2m_mean']) > 0:
+                        recent_temp = daily['temperature_2m_mean'][-1]
+                        if recent_temp is not None:
+                            weather_data[f'temp_station_{i}'] = recent_temp
+                        else:
+                            weather_data[f'temp_station_{i}'] = 50.0  # Default
+                    else:
+                        weather_data[f'temp_station_{i}'] = 50.0
+                        
+            except Exception as e:
+                st.warning(f"Could not fetch weather data for {station.name}: {e}")
+                # Fill with zeros as fallback
+                for day_idx in range(days_back):
+                    weather_data[f'station_{i}_day_{day_idx}'] = 0.0
+                weather_data[f'temp_station_{i}'] = 50.0
+        
+        return weather_data
+    
+    @st.cache_data(ttl=600)  # Cache for 10 minutes  
+    def get_current_weather(_self, lat: float, lon: float) -> Dict:
+        """Get current weather conditions"""
+        try:
+            url = "https://api.open-meteo.com/v1/forecast"
+            params = {
+                'latitude': lat,
+                'longitude': lon,
+                'current': ['temperature_2m', 'precipitation'],
+                'timezone': 'America/New_York',
+                'temperature_unit': 'fahrenheit',
+                'precipitation_unit': 'inch'
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'current' in data:
+                current = data['current']
+                return {
+                    'temperature': current.get('temperature_2m', 50.0),
+                    'precipitation': current.get('precipitation', 0.0)
+                }
+        except:
+            pass
+        
+        return {'temperature': 50.0, 'precipitation': 0.0}
         """Fetch USGS data for any site"""
         try:
             url = f"https://waterservices.usgs.gov/nwis/iv/"
@@ -375,6 +463,29 @@ def main():
         current_usgs_flow = None
         st.warning("⚠️ Could not fetch current USGS data. Please enter manually.")
     
+    # Auto-fetch weather data
+    with st.spinner("Fetching weather data..."):
+        weather_data = predictor.fetch_weather_data(river_config.weather_stations)
+        
+        # Get current weather from primary station
+        primary_station = river_config.weather_stations[0]
+        current_weather = predictor.get_current_weather(primary_station.lat, primary_station.lon)
+    
+    if weather_data:
+        st.success("✅ Weather data loaded automatically")
+        
+        # Show weather summary
+        st.info(f"""
+        **Automatic Weather Data Summary:**
+        - **Current Temperature**: {current_weather['temperature']:.1f}°F
+        - **Recent Precipitation** (last 3 days): {sum(weather_data.get(f'station_0_day_{i}', 0) for i in range(3)):.2f} inches
+        - **Data Sources**: {len(river_config.weather_stations)} weather stations in watershed
+        """)
+    else:
+        st.warning("⚠️ Could not fetch weather data. Using manual input.")
+        weather_data = {}
+        current_weather = {'temperature': 50.0}
+    
     # Layout
     col1, col2 = st.columns([2, 1])
     
@@ -413,32 +524,38 @@ def main():
             with col_hist3:
                 day14_flow = st.number_input("2 weeks ago (cfs)", value=0.0, step=100.0)
         
-        # Precipitation data - dynamic based on weather stations
-        with st.expander("🌧️ Recent Precipitation", expanded=True):
-            precipitation_data = {}
-            
-            for i, station in enumerate(river_config.weather_stations):
-                st.markdown(f"**{station.name}** ({'⭐' * int(station.weight * 3)})")
+        if show_manual_weather:
+            with st.expander("🌧️ Manual Weather Input", expanded=True):
+                st.warning("⚠️ Auto weather data not available - please enter manually")
                 
-                cols = st.columns(4)
-                days = ["Today", "Yesterday", "2 days ago", "3 days ago", "4 days ago", "5 days ago", "6 days ago"]
+                manual_precipitation_data = {}
                 
-                for day_idx in range(min(7, len(days))):
-                    col_idx = day_idx % 4
-                    if day_idx > 0 and col_idx == 0:
-                        cols = st.columns(4)
+                for i, station in enumerate(river_config.weather_stations):
+                    st.markdown(f"**{station.name}** ({'⭐' * int(station.weight * 3)})")
                     
-                    with cols[col_idx]:
-                        if day_idx < len(days):
-                            value = st.number_input(
-                                days[day_idx],
-                                value=0.0,
-                                step=0.01,
-                                format="%.2f",
-                                key=f"station_{i}_day_{day_idx}",
-                                label_visibility="visible" if day_idx < 4 else "collapsed"
-                            )
-                            precipitation_data[f'station_{i}_day_{day_idx}'] = value
+                    cols = st.columns(4)
+                    days = ["Today", "Yesterday", "2 days ago", "3 days ago", "4 days ago", "5 days ago", "6 days ago"]
+                    
+                    for day_idx in range(min(7, len(days))):
+                        col_idx = day_idx % 4
+                        if day_idx > 0 and col_idx == 0:
+                            cols = st.columns(4)
+                        
+                        with cols[col_idx]:
+                            if day_idx < len(days):
+                                value = st.number_input(
+                                    days[day_idx],
+                                    value=0.0,
+                                    step=0.01,
+                                    format="%.2f",
+                                    key=f"manual_station_{i}_day_{day_idx}",
+                                    label_visibility="visible" if day_idx < 4 else "collapsed"
+                                )
+                                manual_precipitation_data[f'station_{i}_day_{day_idx}'] = value
+                
+                # Use manual data if available
+                if manual_precipitation_data:
+                    weather_data.update(manual_precipitation_data)
         
         # Prediction button
         if st.button("🔮 Generate Flow Prediction", type="primary", use_container_width=True):
@@ -452,6 +569,9 @@ def main():
             }
             
             temperature = {'current': current_temp}
+            
+            # Use weather_data (either auto-fetched or manually entered)
+            precipitation_data = weather_data if weather_data else {}
             
             # Calculate prediction
             prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, precipitation_data, temperature)
