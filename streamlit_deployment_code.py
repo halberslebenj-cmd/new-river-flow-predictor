@@ -126,7 +126,7 @@ class MultiRiverPredictor:
                 name="French Broad River at Hot Springs, NC",
                 usgs_site="03451500",
                 state="NC/TN",
-                description="Classic Class III-IV river through scenic Appalachian gorge",
+                description="Ashville Classic",
                 weather_stations=french_broad_stations,
                 flow_categories=[
                     FlowCategory(0, 500, "Very Low", "#DC2626", "Too low - rocks everywhere", "No Go"),
@@ -159,7 +159,7 @@ class MultiRiverPredictor:
                 name="Nolichucky River at Erwin, TN",
                 usgs_site="03467000",
                 state="TN/NC",
-                description="Technical Class III-IV with stunning gorge scenery",
+                description="Erwin Classic - 9 miles of class III/IV",
                 weather_stations=nolichucky_stations,
                 flow_categories=[
                     FlowCategory(0, 800, "Very Low", "#DC2626", "Too low - not runnable", "No Go"),
@@ -192,7 +192,7 @@ class MultiRiverPredictor:
                 name="Watauga River at Sugar Grove, NC",
                 usgs_site="03479000",
                 state="NC/TN", 
-                description="Fun Class II-III with continuous rapids and beautiful scenery",
+                description="A Southeast Classic",
                 weather_stations=watauga_stations,
                 flow_categories=[
                     FlowCategory(0, 200, "Very Low", "#DC2626", "Unrunnable - all rocks", "No Go"),
