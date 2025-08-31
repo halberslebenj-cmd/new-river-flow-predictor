@@ -12,7 +12,6 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import requests
 import json
-import yaml
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
