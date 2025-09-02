@@ -233,7 +233,7 @@ class MultiRiverPredictor:
                 'format': 'json',
                 'sites': site_id,
                 'parameterCd': '00060',
-                'period': 'P7D'
+                'period': 'P14D'  # Get 14 days of data for better history
             }
             
             response = requests.get(url, params=params, timeout=10)
@@ -245,7 +245,14 @@ class MultiRiverPredictor:
                 df = pd.DataFrame(values)
                 df['dateTime'] = pd.to_datetime(df['dateTime'])
                 df['flow'] = pd.to_numeric(df['value'], errors='coerce')
-                return df.dropna()
+                df = df.dropna().sort_values('dateTime')  # Sort by date
+                
+                # Remove duplicates and keep one reading per day (most recent)
+                df['date'] = df['dateTime'].dt.date
+                df_daily = df.groupby('date').last().reset_index()
+                df_daily['dateTime'] = pd.to_datetime(df_daily['date'])
+                
+                return df_daily[['dateTime', 'flow']]
             return None
             
         except Exception as e:
@@ -433,31 +440,57 @@ def main():
         # Auto-populate flow history from USGS data
         flow_history_auto = {}
         if len(usgs_data) > 1:
-            # Yesterday (1 day back)
-            if len(usgs_data) >= 2:
-                flow_history_auto['yesterday'] = usgs_data.iloc[-2]['flow']
-            # 2 days ago
-            if len(usgs_data) >= 3:
-                flow_history_auto['day2'] = usgs_data.iloc[-3]['flow']
-            # 3 days ago  
-            if len(usgs_data) >= 4:
-                flow_history_auto['day3'] = usgs_data.iloc[-4]['flow']
-            # 1 week ago (7 days back)
-            if len(usgs_data) >= 8:
-                flow_history_auto['day7'] = usgs_data.iloc[-8]['flow']
-            # 2 weeks ago (14 days back) - might not be available in 7-day data
+            # Get today's date for proper indexing
+            today = datetime.now().date()
+            
+            # Create a lookup dictionary by date
+            flow_by_date = {}
+            for _, row in usgs_data.iterrows():
+                date_key = row['dateTime'].date()
+                flow_by_date[date_key] = row['flow']
+            
+            # Get historical flows by going back specific days
+            yesterday_date = today - timedelta(days=1)
+            day2_date = today - timedelta(days=2)
+            day3_date = today - timedelta(days=3)
+            day7_date = today - timedelta(days=7)
+            day14_date = today - timedelta(days=14)
+            
+            # Look up flows for each date
+            if yesterday_date in flow_by_date:
+                flow_history_auto['yesterday'] = flow_by_date[yesterday_date]
+            if day2_date in flow_by_date:
+                flow_history_auto['day2'] = flow_by_date[day2_date]
+            if day3_date in flow_by_date:
+                flow_history_auto['day3'] = flow_by_date[day3_date]
+            if day7_date in flow_by_date:
+                flow_history_auto['day7'] = flow_by_date[day7_date]
+            if day14_date in flow_by_date:
+                flow_history_auto['day14'] = flow_by_date[day14_date]
+            
+            # Debug info (you can remove this later)
+            st.sidebar.markdown("**🔍 Debug Info:**")
+            st.sidebar.text(f"Data points: {len(usgs_data)}")
+            st.sidebar.text(f"Date range: {usgs_data['dateTime'].min().date()} to {usgs_data['dateTime'].max().date()}")
+            st.sidebar.text(f"Today: {today}")
             
         flow_history_summary = []
-        if flow_history_auto.get('yesterday'):
-            flow_history_summary.append(f"Yesterday: {flow_history_auto['yesterday']:.0f} cfs")
-        if flow_history_auto.get('day2'):
-            flow_history_summary.append(f"2 days ago: {flow_history_auto['day2']:.0f} cfs")
-        if flow_history_auto.get('day7'):
-            flow_history_summary.append(f"1 week ago: {flow_history_auto['day7']:.0f} cfs")
+        for key, value in flow_history_auto.items():
+            day_names = {
+                'yesterday': 'Yesterday',
+                'day2': '2 days ago', 
+                'day3': '3 days ago',
+                'day7': '1 week ago',
+                'day14': '2 weeks ago'
+            }
+            if key in day_names:
+                flow_history_summary.append(f"{day_names[key]}: {value:.0f} cfs")
             
         if flow_history_summary:
             st.info(f"✅ **Flow History Auto-Loaded:** {' • '.join(flow_history_summary)}")
-        
+        else:
+            st.warning("⚠️ Could not extract flow history - dates may not match")
+            
     else:
         current_usgs_flow = None
         flow_history_auto = {}
