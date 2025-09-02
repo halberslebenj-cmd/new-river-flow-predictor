@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-River Flow Prediction Framework
+Multi-River Flow Prediction Framework with Auto Weather Data
 A configurable system for predicting flows on multiple rivers
 """
 
@@ -126,7 +126,7 @@ class MultiRiverPredictor:
                 name="French Broad River at Hot Springs, NC",
                 usgs_site="03451500",
                 state="NC/TN",
-                description="Ashville Classic",
+                description="Classic Class III-IV river through scenic Appalachian gorge",
                 weather_stations=french_broad_stations,
                 flow_categories=[
                     FlowCategory(0, 500, "Very Low", "#DC2626", "Too low - rocks everywhere", "No Go"),
@@ -159,7 +159,7 @@ class MultiRiverPredictor:
                 name="Nolichucky River at Erwin, TN",
                 usgs_site="03467000",
                 state="TN/NC",
-                description="Erwin Classic - 9 miles of class III/IV",
+                description="Technical Class III-IV with stunning gorge scenery",
                 weather_stations=nolichucky_stations,
                 flow_categories=[
                     FlowCategory(0, 800, "Very Low", "#DC2626", "Too low - not runnable", "No Go"),
@@ -192,7 +192,7 @@ class MultiRiverPredictor:
                 name="Watauga River at Sugar Grove, NC",
                 usgs_site="03479000",
                 state="NC/TN", 
-                description="A Southeast Classic",
+                description="Fun Class II-III with continuous rapids and beautiful scenery",
                 weather_stations=watauga_stations,
                 flow_categories=[
                     FlowCategory(0, 200, "Very Low", "#DC2626", "Unrunnable - all rocks", "No Go"),
@@ -223,8 +223,8 @@ class MultiRiverPredictor:
         }
         
         return rivers
-    
-    @st.cache_data(ttl=300)
+
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
     def fetch_usgs_data(_self, site_id: str) -> Optional[pd.DataFrame]:
         """Fetch USGS data for any site"""
         try:
@@ -251,7 +251,65 @@ class MultiRiverPredictor:
         except Exception as e:
             st.error(f"Error fetching USGS data for {site_id}: {e}")
             return None
-    
+
+    @st.cache_data(ttl=1800)  # Cache for 30 minutes
+    def fetch_weather_data(_self, stations: List[WeatherStation], days_back: int = 7) -> Dict:
+        """Fetch weather data from Open-Meteo API for multiple stations"""
+        weather_data = {}
+        
+        for i, station in enumerate(stations):
+            try:
+                # Open-Meteo API (free, no API key needed)
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days_back)
+                
+                url = "https://api.open-meteo.com/v1/forecast"
+                params = {
+                    'latitude': station.lat,
+                    'longitude': station.lon,
+                    'daily': ['precipitation_sum', 'temperature_2m_mean'],
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'timezone': 'America/New_York',
+                    'temperature_unit': 'fahrenheit',
+                    'precipitation_unit': 'inch'
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'daily' in data:
+                    daily = data['daily']
+                    dates = daily['time']
+                    
+                    # Store data for each day (reverse order so day_0 is most recent)
+                    for day_idx in range(min(days_back, len(dates))):
+                        precip_idx = len(dates) - 1 - day_idx
+                        day_key = f'station_{i}_day_{day_idx}'
+                        
+                        if precip_idx >= 0 and precip_idx < len(daily.get('precipitation_sum', [])):
+                            precip_value = daily['precipitation_sum'][precip_idx]
+                            weather_data[day_key] = precip_value if precip_value is not None else 0.0
+                        else:
+                            weather_data[day_key] = 0.0
+                    
+                    # Current temperature (most recent)
+                    if daily.get('temperature_2m_mean') and len(daily['temperature_2m_mean']) > 0:
+                        recent_temp = daily['temperature_2m_mean'][-1]
+                        weather_data[f'temp_station_{i}'] = recent_temp if recent_temp is not None else 50.0
+                    else:
+                        weather_data[f'temp_station_{i}'] = 50.0
+                        
+            except Exception as e:
+                st.warning(f"Could not fetch weather data for {station.name}: {str(e)}")
+                # Fill with zeros as fallback
+                for day_idx in range(days_back):
+                    weather_data[f'station_{i}_day_{day_idx}'] = 0.0
+                weather_data[f'temp_station_{i}'] = 50.0
+        
+        return weather_data
+
     def get_flow_category(self, river_config: RiverConfig, flow: float) -> FlowCategory:
         """Get flow category for specific river"""
         for cat in river_config.flow_categories:
@@ -286,7 +344,7 @@ class MultiRiverPredictor:
             for j, station in enumerate(river_config.weather_stations):
                 station_precip = precipitation.get(f'station_{j}_day_{i}', 0)
                 day_precip += station_precip * station.weight
-            weighted_precip[f'day_{i}'] = day_precip / total_weight
+            weighted_precip[f'day_{i}'] = day_precip / total_weight if total_weight > 0 else 0
         
         # Apply precipitation effects
         predicted_flow += weighted_precip['day_0'] * params['precip_today']
@@ -362,7 +420,7 @@ def main():
     # Header
     st.title(f"🌊 {river_config.name}")
     st.markdown(f"**USGS Gauge #{river_config.usgs_site}**")
-    st.markdown("Multi-river flow prediction system • Updated: " + datetime.now().strftime("%Y-%m-%d %H:%M"))
+    st.markdown("Multi-river flow prediction with auto weather data • Updated: " + datetime.now().strftime("%Y-%m-%d %H:%M"))
     
     # Auto-fetch current USGS data
     with st.spinner("Fetching current USGS data..."):
@@ -375,6 +433,33 @@ def main():
         current_usgs_flow = None
         st.warning("⚠️ Could not fetch current USGS data. Please enter manually.")
     
+    # Auto-fetch weather data
+    with st.spinner("Fetching weather data..."):
+        weather_data = predictor.fetch_weather_data(river_config.weather_stations)
+    
+    if weather_data:
+        # Calculate current temperature (average from stations)
+        temp_keys = [key for key in weather_data.keys() if key.startswith('temp_station_')]
+        if temp_keys:
+            current_temp = sum(weather_data[key] for key in temp_keys) / len(temp_keys)
+        else:
+            current_temp = 50.0
+        
+        st.success("✅ Weather data loaded automatically")
+        
+        # Show weather summary
+        recent_precip = sum(weather_data.get(f'station_0_day_{i}', 0) for i in range(3))
+        st.info(f"""
+        **Automatic Weather Data Summary:**
+        - **Current Temperature**: {current_temp:.1f}°F
+        - **Recent Precipitation** (last 3 days): {recent_precip:.2f} inches
+        - **Data Sources**: {len(river_config.weather_stations)} weather stations in watershed
+        """)
+    else:
+        st.warning("⚠️ Could not fetch weather data. Using defaults.")
+        weather_data = {}
+        current_temp = 50.0
+
     # Layout
     col1, col2 = st.columns([2, 1])
     
@@ -387,18 +472,20 @@ def main():
                 "Current Flow (cfs)",
                 value=float(current_usgs_flow) if current_usgs_flow else 2500.0,
                 min_value=0.0,
-                step=100.0
+                step=100.0,
+                help="Current flow from USGS gauge (auto-filled if available)"
             )
             
-            current_temp = st.number_input(
+            display_temp = st.number_input(
                 "Current Temperature (°F)",
-                value=50.0,
+                value=current_temp,
                 min_value=-20.0,
                 max_value=100.0,
-                step=1.0
+                step=1.0,
+                help="Auto-filled from weather data"
             )
         
-        # Flow history
+        # Flow history (optional)
         with st.expander("📈 Recent Flow History (Optional)", expanded=False):
             col_hist1, col_hist2, col_hist3 = st.columns(3)
             
@@ -412,34 +499,52 @@ def main():
             
             with col_hist3:
                 day14_flow = st.number_input("2 weeks ago (cfs)", value=0.0, step=100.0)
-        
-        # Precipitation data - dynamic based on weather stations
-        with st.expander("🌧️ Recent Precipitation", expanded=True):
-            precipitation_data = {}
-            
-            for i, station in enumerate(river_config.weather_stations):
-                st.markdown(f"**{station.name}** ({'⭐' * int(station.weight * 3)})")
+
+        # Weather override option
+        if weather_data:
+            with st.expander("🌧️ Weather Data (Auto-Loaded)", expanded=False):
+                st.markdown("**✅ Precipitation data loaded automatically**")
+                
+                # Show summary of loaded data
+                col1_weather, col2_weather = st.columns(2)
+                
+                with col1_weather:
+                    st.markdown("**Recent Precipitation:**")
+                    for day in range(4):
+                        day_name = ["Today", "Yesterday", "2 days ago", "3 days ago"][day]
+                        # Average across stations
+                        avg_precip = sum(weather_data.get(f'station_{i}_day_{day}', 0) 
+                                       for i in range(len(river_config.weather_stations))) / len(river_config.weather_stations)
+                        st.text(f"{day_name}: {avg_precip:.2f}\"")
+                
+                with col2_weather:
+                    override_weather = st.checkbox("Override with manual input")
+                    if override_weather:
+                        st.info("Weather inputs will appear below")
+
+        # Manual weather input (if needed)
+        if not weather_data or st.session_state.get("override_weather", False):
+            with st.expander("🌧️ Manual Weather Input", expanded=True):
+                st.warning("⚠️ Enter precipitation data manually")
+                
+                # Simple manual input - just primary station
+                st.markdown(f"**{river_config.weather_stations[0].name} (Primary)**")
                 
                 cols = st.columns(4)
-                days = ["Today", "Yesterday", "2 days ago", "3 days ago", "4 days ago", "5 days ago", "6 days ago"]
+                days = ["Today", "Yesterday", "2 days ago", "3 days ago"]
                 
-                for day_idx in range(min(7, len(days))):
-                    col_idx = day_idx % 4
-                    if day_idx > 0 and col_idx == 0:
-                        cols = st.columns(4)
-                    
-                    with cols[col_idx]:
-                        if day_idx < len(days):
-                            value = st.number_input(
-                                days[day_idx],
-                                value=0.0,
-                                step=0.01,
-                                format="%.2f",
-                                key=f"station_{i}_day_{day_idx}",
-                                label_visibility="visible" if day_idx < 4 else "collapsed"
-                            )
-                            precipitation_data[f'station_{i}_day_{day_idx}'] = value
-        
+                for day_idx, day_name in enumerate(days):
+                    with cols[day_idx]:
+                        manual_precip = st.number_input(
+                            day_name,
+                            value=0.0,
+                            step=0.01,
+                            format="%.2f",
+                            key=f"manual_day_{day_idx}"
+                        )
+                        # Override weather_data with manual input
+                        weather_data[f'station_0_day_{day_idx}'] = manual_precip
+
         # Prediction button
         if st.button("🔮 Generate Flow Prediction", type="primary", use_container_width=True):
             # Prepare data
@@ -451,11 +556,11 @@ def main():
                 'day14': day14_flow if day14_flow > 0 else None
             }
             
-            temperature = {'current': current_temp}
+            temperature = {'current': display_temp}
             
             # Calculate prediction
-            prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, precipitation_data, temperature)
-            confidence = predictor.calculate_confidence(flow_history, precipitation_data)
+            prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, weather_data, temperature)
+            confidence = predictor.calculate_confidence(flow_history, weather_data)
             
             # Store in session state
             st.session_state[f'prediction_{selected_river_key}'] = prediction
@@ -498,7 +603,7 @@ def main():
             st.markdown(f"**Conditions:** {category.description}")
             
             # Flow categories for this river
-            st.subheader(f"📊 {river_config.name.split(' at ')[0]} Flow Categories")
+            st.subheader(f"📊 Flow Categories")
             
             categories_data = []
             for cat in river_config.flow_categories:
@@ -554,8 +659,7 @@ def main():
         st.subheader("🔗 Data Sources")
         st.markdown(f"""
         - [USGS Gauge #{river_config.usgs_site}](https://waterdata.usgs.gov/nwis/uv?site_no={river_config.usgs_site})
-        - [Weather Underground - Regional](https://www.wunderground.com/)
-        - [NOAA Weather Data](https://www.weather.gov/)
+        - [Open-Meteo Weather API](https://open-meteo.com/) (Auto-updated)
         - [American Whitewater](https://www.americanwhitewater.org/)
         """)
     
