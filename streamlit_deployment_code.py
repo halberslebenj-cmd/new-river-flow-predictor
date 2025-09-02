@@ -429,8 +429,38 @@ def main():
     if usgs_data is not None and len(usgs_data) > 0:
         current_usgs_flow = usgs_data.iloc[-1]['flow']
         st.success(f"✅ Current Flow: **{current_usgs_flow:.0f} cfs** (auto-updated)")
+        
+        # Auto-populate flow history from USGS data
+        flow_history_auto = {}
+        if len(usgs_data) > 1:
+            # Yesterday (1 day back)
+            if len(usgs_data) >= 2:
+                flow_history_auto['yesterday'] = usgs_data.iloc[-2]['flow']
+            # 2 days ago
+            if len(usgs_data) >= 3:
+                flow_history_auto['day2'] = usgs_data.iloc[-3]['flow']
+            # 3 days ago  
+            if len(usgs_data) >= 4:
+                flow_history_auto['day3'] = usgs_data.iloc[-4]['flow']
+            # 1 week ago (7 days back)
+            if len(usgs_data) >= 8:
+                flow_history_auto['day7'] = usgs_data.iloc[-8]['flow']
+            # 2 weeks ago (14 days back) - might not be available in 7-day data
+            
+        flow_history_summary = []
+        if flow_history_auto.get('yesterday'):
+            flow_history_summary.append(f"Yesterday: {flow_history_auto['yesterday']:.0f} cfs")
+        if flow_history_auto.get('day2'):
+            flow_history_summary.append(f"2 days ago: {flow_history_auto['day2']:.0f} cfs")
+        if flow_history_auto.get('day7'):
+            flow_history_summary.append(f"1 week ago: {flow_history_auto['day7']:.0f} cfs")
+            
+        if flow_history_summary:
+            st.info(f"✅ **Flow History Auto-Loaded:** {' • '.join(flow_history_summary)}")
+        
     else:
         current_usgs_flow = None
+        flow_history_auto = {}
         st.warning("⚠️ Could not fetch current USGS data. Please enter manually.")
     
     # Auto-fetch weather data
@@ -485,20 +515,58 @@ def main():
                 help="Auto-filled from weather data"
             )
         
-        # Flow history (optional)
-        with st.expander("📈 Recent Flow History (Optional)", expanded=False):
-            col_hist1, col_hist2, col_hist3 = st.columns(3)
+        # Flow history (auto-populated but can override)
+        with st.expander("📈 Recent Flow History (Auto-Loaded)", expanded=False):
+            st.markdown("**✅ Flow history loaded from USGS data**")
             
-            with col_hist1:
-                yesterday_flow = st.number_input("Yesterday (cfs)", value=0.0, step=100.0)
-                day2_flow = st.number_input("2 days ago (cfs)", value=0.0, step=100.0)
+            if flow_history_auto:
+                # Show what was auto-loaded
+                col_auto1, col_auto2 = st.columns(2)
+                
+                with col_auto1:
+                    st.markdown("**Auto-Loaded Values:**")
+                    for key, value in flow_history_auto.items():
+                        day_name = {
+                            'yesterday': 'Yesterday',
+                            'day2': '2 days ago', 
+                            'day3': '3 days ago',
+                            'day7': '1 week ago'
+                        }.get(key, key)
+                        st.text(f"{day_name}: {value:.0f} cfs")
+                
+                with col_auto2:
+                    override_flow_history = st.checkbox("Override with manual input", key="override_flow")
+                    if override_flow_history:
+                        st.info("Manual inputs enabled below")
             
-            with col_hist2:
-                day3_flow = st.number_input("3 days ago (cfs)", value=0.0, step=100.0)
-                day7_flow = st.number_input("1 week ago (cfs)", value=0.0, step=100.0)
+            # Show manual inputs if no auto data or override selected
+            show_manual_flow = not flow_history_auto or st.session_state.get("override_flow", False)
             
-            with col_hist3:
-                day14_flow = st.number_input("2 weeks ago (cfs)", value=0.0, step=100.0)
+            if show_manual_flow:
+                st.markdown("**Manual Flow Input:**")
+                col_hist1, col_hist2, col_hist3 = st.columns(3)
+                
+                with col_hist1:
+                    yesterday_flow = st.number_input("Yesterday (cfs)", 
+                        value=float(flow_history_auto.get('yesterday', 0)), step=100.0, key="manual_yesterday")
+                    day2_flow = st.number_input("2 days ago (cfs)", 
+                        value=float(flow_history_auto.get('day2', 0)), step=100.0, key="manual_day2")
+                
+                with col_hist2:
+                    day3_flow = st.number_input("3 days ago (cfs)", 
+                        value=float(flow_history_auto.get('day3', 0)), step=100.0, key="manual_day3")
+                    day7_flow = st.number_input("1 week ago (cfs)", 
+                        value=float(flow_history_auto.get('day7', 0)), step=100.0, key="manual_day7")
+                
+                with col_hist3:
+                    day14_flow = st.number_input("2 weeks ago (cfs)", value=0.0, step=100.0, key="manual_day14")
+            else:
+                # Use auto-loaded values
+                yesterday_flow = flow_history_auto.get('yesterday', 0)
+                day2_flow = flow_history_auto.get('day2', 0)
+                day3_flow = flow_history_auto.get('day3', 0)
+                day7_flow = flow_history_auto.get('day7', 0)
+                day14_flow = 0
 
         # Weather override option
         if weather_data:
