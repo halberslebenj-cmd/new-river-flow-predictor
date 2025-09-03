@@ -259,8 +259,130 @@ class MultiRiverPredictor:
             st.error(f"Error fetching USGS data for {site_id}: {e}")
             return None
 
+    @st.cache_data(ttl=3600)  # Cache for 1 hour (forecasts don't change rapidly)
+    def fetch_weather_forecast(_self, stations: List[WeatherStation], days_ahead: int = 7) -> Dict:
+        """Fetch weather forecast from Open-Meteo API for multiple stations"""
+        forecast_data = {}
+        
+        for i, station in enumerate(stations):
+            try:
+                # Open-Meteo Forecast API
+                start_date = datetime.now().date()
+                end_date = start_date + timedelta(days=days_ahead)
+                
+                url = "https://api.open-meteo.com/v1/forecast"
+                params = {
+                    'latitude': station.lat,
+                    'longitude': station.lon,
+                    'daily': ['precipitation_sum', 'temperature_2m_mean', 'precipitation_probability_max'],
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'timezone': 'America/New_York',
+                    'temperature_unit': 'fahrenheit',
+                    'precipitation_unit': 'inch'
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                if 'daily' in data:
+                    daily = data['daily']
+                    
+                    # Store forecast data for each day ahead
+                    for day_idx in range(min(days_ahead, len(daily['time']))):
+                        day_key = f'station_{i}_forecast_day_{day_idx}'
+                        
+                        if day_idx < len(daily.get('precipitation_sum', [])):
+                            precip_value = daily['precipitation_sum'][day_idx]
+                            forecast_data[day_key] = precip_value if precip_value is not None else 0.0
+                        else:
+                            forecast_data[day_key] = 0.0
+                        
+                        # Precipitation probability
+                        prob_key = f'station_{i}_precip_prob_day_{day_idx}'
+                        if day_idx < len(daily.get('precipitation_probability_max', [])):
+                            prob_value = daily['precipitation_probability_max'][day_idx]
+                            forecast_data[prob_key] = prob_value if prob_value is not None else 0
+                        else:
+                            forecast_data[prob_key] = 0
+                    
+                    # Store forecast temperatures
+                    if daily.get('temperature_2m_mean'):
+                        for day_idx in range(min(days_ahead, len(daily['temperature_2m_mean']))):
+                            temp_key = f'station_{i}_temp_forecast_day_{day_idx}'
+                            temp_value = daily['temperature_2m_mean'][day_idx]
+                            forecast_data[temp_key] = temp_value if temp_value is not None else 50.0
+                        
+            except Exception as e:
+                st.warning(f"Could not fetch forecast data for {station.name}: {str(e)}")
+                # Fill with zeros as fallback
+                for day_idx in range(days_ahead):
+                    forecast_data[f'station_{i}_forecast_day_{day_idx}'] = 0.0
+                    forecast_data[f'station_{i}_precip_prob_day_{day_idx}'] = 0
+                    forecast_data[f'station_{i}_temp_forecast_day_{day_idx}'] = 50.0
+        
+        return forecast_data
+
+    def calculate_forecast_prediction(self, river_config: RiverConfig, current_flow: float,
+                                    historical_precip: Dict, forecast_data: Dict, 
+                                    days_ahead: int = 1) -> Tuple[int, int]:
+        """Calculate flow prediction for multiple days ahead using forecast data"""
+        
+        params = river_config.model_params
+        predictions = []
+        
+        # Start with current flow
+        predicted_flow = current_flow
+        
+        for target_day in range(1, days_ahead + 1):
+            # Flow persistence decreases over time
+            persistence_factor = params['flow_persistence'] * (0.95 ** target_day)
+            daily_prediction = predicted_flow * persistence_factor
+            
+            # Calculate weighted precipitation for this forecast day
+            total_weight = sum(station.weight for station in river_config.weather_stations)
+            
+            # Get forecast precipitation for target day
+            forecast_precip = 0
+            for j, station in enumerate(river_config.weather_stations):
+                station_forecast = forecast_data.get(f'station_{j}_forecast_day_{target_day-1}', 0)
+                forecast_precip += station_forecast * station.weight
+            forecast_precip = forecast_precip / total_weight if total_weight > 0 else 0
+            
+            # Apply precipitation effect (stronger for closer days)
+            precip_effect = forecast_precip * params['precip_yesterday'] * (0.9 ** (target_day - 1))
+            daily_prediction += precip_effect
+            
+            # Add some influence from recent historical precipitation (decreasing over time)
+            for hist_day in range(min(3, len(historical_precip))):
+                hist_key = f'station_0_day_{hist_day}'
+                if hist_key in historical_precip:
+                    hist_influence = historical_precip[hist_key] * 10 * (0.8 ** (target_day + hist_day))
+                    daily_prediction += hist_influence
+            
+            # Seasonal adjustment
+            month = datetime.now().month
+            seasonal_mult = river_config.seasonal_adjustments.get(month, 1.0)
+            daily_prediction *= seasonal_mult
+            
+            # Temperature effects (forecast)
+            forecast_temp = forecast_data.get(f'station_0_temp_forecast_day_{target_day-1}', 50)
+            if forecast_temp < 32:
+                daily_prediction *= 0.8
+            
+            # Add base flow and enforce minimum
+            daily_prediction += params['base_flow']
+            daily_prediction = max(daily_prediction, params['min_flow'])
+            
+            predictions.append(int(daily_prediction))
+            
+            # Use this prediction as base for next day
+            predicted_flow = daily_prediction * 0.9  # Slight decay for multi-day
+            
     @st.cache_data(ttl=1800)  # Cache for 30 minutes
     def fetch_weather_data(_self, stations: List[WeatherStation], days_back: int = 7) -> Dict:
+        """Fetch weather data from Open-Meteo API for multiple stations"""
         """Fetch weather data from Open-Meteo API for multiple stations"""
         weather_data = {}
         
@@ -523,6 +645,31 @@ def main():
         weather_data = {}
         current_temp = 50.0
 
+    # Show forecast summary
+    if forecast_data:
+        st.success("✅ Weather forecast loaded automatically")
+        
+        # Calculate forecast summary
+        forecast_precip_3day = sum(forecast_data.get(f'station_0_forecast_day_{i}', 0) for i in range(3))
+        forecast_precip_7day = sum(forecast_data.get(f'station_0_forecast_day_{i}', 0) for i in range(7))
+        
+        # Show forecast summary with probability
+        forecast_summary = []
+        for day in range(3):  # Next 3 days
+            day_precip = forecast_data.get(f'station_0_forecast_day_{day}', 0)
+            day_prob = forecast_data.get(f'station_0_precip_prob_day_{day}', 0)
+            day_names = ["Tomorrow", "Day after", "3 days out"][day]
+            if day_precip > 0.1 or day_prob > 30:
+                forecast_summary.append(f"{day_names}: {day_precip:.2f}\" ({day_prob}% chance)")
+        
+        if forecast_summary:
+            st.info("🌦️ **Upcoming Weather:** " + " • ".join(forecast_summary))
+        else:
+            st.info(f"☀️ **Forecast Summary:** Mostly dry next 3 days ({forecast_precip_3day:.2f}\" total)")
+    else:
+        st.warning("⚠️ Could not fetch forecast data.")
+        forecast_data = {}
+
     # Layout
     col1, col2 = st.columns([2, 1])
     
@@ -646,6 +793,15 @@ def main():
                         # Override weather_data with manual input
                         weather_data[f'station_0_day_{day_idx}'] = manual_precip
 
+        # Prediction options
+        st.subheader("🔮 Prediction Options")
+        
+        prediction_type = st.radio(
+            "Choose prediction type:",
+            ["Single Day (Tomorrow)", "Multi-Day Forecast (7 Days)"],
+            help="Single day uses historical data, multi-day uses weather forecast"
+        )
+        
         # Prediction button
         if st.button("🔮 Generate Flow Prediction", type="primary", use_container_width=True):
             # Prepare data
@@ -659,67 +815,161 @@ def main():
             
             temperature = {'current': display_temp}
             
-            # Calculate prediction
-            prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, weather_data, temperature)
-            confidence = predictor.calculate_confidence(flow_history, weather_data)
-            
-            # Store in session state
-            st.session_state[f'prediction_{selected_river_key}'] = prediction
-            st.session_state[f'confidence_{selected_river_key}'] = confidence
+            if prediction_type == "Single Day (Tomorrow)":
+                # Single day prediction using existing method
+                prediction = predictor.calculate_prediction(river_config, current_flow, flow_history, weather_data, temperature)
+                confidence = predictor.calculate_confidence(flow_history, weather_data)
+                
+                # Store in session state
+                st.session_state[f'prediction_{selected_river_key}'] = prediction
+                st.session_state[f'confidence_{selected_river_key}'] = confidence
+                st.session_state[f'prediction_type_{selected_river_key}'] = "single"
+                
+            else:
+                # Multi-day forecast prediction
+                if forecast_data:
+                    predictions = predictor.calculate_forecast_prediction(
+                        river_config, current_flow, weather_data, forecast_data, days_ahead=7
+                    )
+                    confidence = predictor.calculate_confidence(flow_history, weather_data)
+                    
+                    # Store forecast predictions
+                    st.session_state[f'predictions_{selected_river_key}'] = predictions
+                    st.session_state[f'confidence_{selected_river_key}'] = confidence
+                    st.session_state[f'prediction_type_{selected_river_key}'] = "forecast"
+                else:
+                    st.error("❌ Cannot create forecast - weather forecast data not available")
     
     with col2:
         st.header("🎯 Prediction Results")
         
         prediction_key = f'prediction_{selected_river_key}'
+        predictions_key = f'predictions_{selected_river_key}'
         confidence_key = f'confidence_{selected_river_key}'
+        prediction_type_key = f'prediction_type_{selected_river_key}'
         
-        if prediction_key in st.session_state:
-            prediction = st.session_state[prediction_key]
-            confidence = st.session_state[confidence_key]
-            category = predictor.get_flow_category(river_config, prediction)
+        # Check what type of prediction we have
+        if prediction_type_key in st.session_state:
+            pred_type = st.session_state[prediction_type_key]
+            confidence = st.session_state.get(confidence_key, 50)
             
-            # Main prediction display
-            st.markdown(f"""
-            <div style="
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                padding: 20px;
-                border-radius: 10px;
-                color: white;
-                text-align: center;
-                margin-bottom: 20px;
-            ">
-                <h2 style="margin: 0; color: white;">Tomorrow's Flow</h2>
-                <h1 style="margin: 10px 0; font-size: 3em; color: white;">{prediction:,}</h1>
-                <h3 style="margin: 0; color: white;">cfs</h3>
-                <p style="margin: 10px 0; font-size: 1.2em; color: white;">
-                    <strong>{category.label}</strong><br>
-                    {category.difficulty}
-                </p>
-                <p style="margin: 5px 0; opacity: 0.9; color: white;">
-                    Confidence: {confidence}%
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown(f"**Conditions:** {category.description}")
-            
-            # Flow categories for this river
-            st.subheader(f"📊 Flow Categories")
-            
-            categories_data = []
-            for cat in river_config.flow_categories:
-                range_str = f"{cat.min_flow:,.0f}-{cat.max_flow:,.0f}" if cat.max_flow != float('inf') else f"{cat.min_flow:,.0f}+"
-                categories_data.append({
-                    'Category': cat.label,
-                    'Range (cfs)': range_str,
-                    'Difficulty': cat.difficulty,
-                    'Current': '👈' if cat.min_flow <= prediction < cat.max_flow else ''
-                })
-            
-            st.dataframe(pd.DataFrame(categories_data), use_container_width=True, hide_index=True)
+            if pred_type == "single" and prediction_key in st.session_state:
+                # Single day prediction display
+                prediction = st.session_state[prediction_key]
+                category = predictor.get_flow_category(river_config, prediction)
+                
+                # Main prediction display
+                st.markdown(f"""
+                <div style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 20px;
+                    border-radius: 10px;
+                    color: white;
+                    text-align: center;
+                    margin-bottom: 20px;
+                ">
+                    <h2 style="margin: 0; color: white;">Tomorrow's Flow</h2>
+                    <h1 style="margin: 10px 0; font-size: 3em; color: white;">{prediction:,}</h1>
+                    <h3 style="margin: 0; color: white;">cfs</h3>
+                    <p style="margin: 10px 0; font-size: 1.2em; color: white;">
+                        <strong>{category.label}</strong><br>
+                        {category.difficulty}
+                    </p>
+                    <p style="margin: 5px 0; opacity: 0.9; color: white;">
+                        Confidence: {confidence}%
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                st.markdown(f"**Conditions:** {category.description}")
+                
+            elif pred_type == "forecast" and predictions_key in st.session_state:
+                # Multi-day forecast display
+                predictions = st.session_state[predictions_key]
+                
+                st.markdown("""
+                <div style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 20px;
+                    border-radius: 10px;
+                    color: white;
+                    text-align: center;
+                    margin-bottom: 20px;
+                ">
+                    <h2 style="margin: 0; color: white;">7-Day Flow Forecast</h2>
+                    <p style="margin: 10px 0; color: white;">Based on weather forecast</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Create forecast table
+                forecast_data_display = []
+                day_names = ["Tomorrow", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"]
+                
+                for i, (day_name, pred_flow) in enumerate(zip(day_names, predictions)):
+                    category = predictor.get_flow_category(river_config, pred_flow)
+                    
+                    # Get forecast precipitation for this day
+                    forecast_precip = forecast_data.get(f'station_0_forecast_day_{i}', 0)
+                    precip_prob = forecast_data.get(f'station_0_precip_prob_day_{i}', 0)
+                    
+                    forecast_data_display.append({
+                        'Day': day_name,
+                        'Predicted Flow': f"{pred_flow:,} cfs",
+                        'Category': category.label,
+                        'Rain Forecast': f"{forecast_precip:.2f}\" ({precip_prob}%)",
+                        '🎯': '🎯' if category.label in ["Good", "High"] else ('⚠️' if category.label in ["Very Low", "Low"] else ''),
+                    })
+                
+                # Display forecast table
+                forecast_df = pd.DataFrame(forecast_data_display)
+                st.dataframe(forecast_df, use_container_width=True, hide_index=True)
+                
+                # Create forecast chart
+                fig = go.Figure()
+                
+                days = list(range(1, len(predictions) + 1))
+                fig.add_trace(go.Scatter(
+                    x=days,
+                    y=predictions,
+                    mode='lines+markers',
+                    name='Predicted Flow',
+                    line=dict(color='#2563EB', width=3),
+                    marker=dict(size=8)
+                ))
+                
+                # Add category background colors
+                for cat in river_config.flow_categories[::-1]:
+                    if cat.max_flow != float('inf'):
+                        fig.add_hrect(
+                            y0=cat.min_flow, y1=cat.max_flow,
+                            fillcolor=cat.color, opacity=0.1,
+                            annotation_text=cat.label, annotation_position="top left"
+                        )
+                
+                fig.update_layout(
+                    title="7-Day Flow Forecast",
+                    xaxis_title="Days Ahead",
+                    yaxis_title="Flow (cfs)",
+                    hovermode='x unified',
+                    xaxis=dict(tickmode='array', tickvals=days, ticktext=day_names)
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Best days recommendation
+                best_days = []
+                for i, (day_name, pred_flow) in enumerate(zip(day_names, predictions)):
+                    category = predictor.get_flow_category(river_config, pred_flow)
+                    if category.label in ["Good", "High", "Moderate"]:
+                        best_days.append(f"{day_name} ({pred_flow:,} cfs)")
+                
+                if best_days:
+                    st.success(f"🎯 **Best Days to Run:** {', '.join(best_days)}")
+                else:
+                    st.warning("⚠️ **No optimal days** in the 7-day forecast")
         
         else:
-            st.info("👆 Enter data above and click 'Generate Flow Prediction' to see results")
+            st.info("👆 Select prediction type and click 'Generate Flow Prediction' to see results")
         
         # River-specific tips
         st.subheader("💡 River-Specific Tips")
