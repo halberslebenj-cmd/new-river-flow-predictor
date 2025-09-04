@@ -519,6 +519,14 @@ class MultiRiverPredictor:
         return min(int(confidence * 100), 95)
 
 def main():
+    # Initialize all variables first to avoid UnboundLocalError
+    weather_data = {}
+    forecast_data = {}
+    current_temp = 50.0
+    current_usgs_flow = None
+    flow_history_auto = {}
+    usgs_data = None
+    
     predictor = MultiRiverPredictor()
     
     # Sidebar for river selection
