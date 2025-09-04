@@ -282,9 +282,24 @@ class MultiRiverPredictor:
                     'precipitation_unit': 'inch'
                 }
                 
-                response = requests.get(url, params=params, timeout=10)
+                # Add debug info
+                st.sidebar.text(f"🔍 Fetching forecast for {station.name}")
+                st.sidebar.text(f"URL: {url}")
+                
+                response = requests.get(url, params=params, timeout=15)  # Increased timeout
+                
+                # Debug response
+                st.sidebar.text(f"Status: {response.status_code}")
+                
                 response.raise_for_status()
                 data = response.json()
+                
+                # Debug data structure
+                if 'daily' in data:
+                    st.sidebar.text(f"✅ Got {len(data['daily']['time'])} forecast days")
+                else:
+                    st.sidebar.text(f"❌ No 'daily' key in response")
+                    st.sidebar.text(f"Keys: {list(data.keys()) if data else 'No data'}")
                 
                 if 'daily' in data:
                     daily = data['daily']
@@ -313,15 +328,26 @@ class MultiRiverPredictor:
                             temp_key = f'station_{i}_temp_forecast_day_{day_idx}'
                             temp_value = daily['temperature_2m_mean'][day_idx]
                             forecast_data[temp_key] = temp_value if temp_value is not None else 50.0
+                
+                # If we got data for the first station, break (to avoid rate limits)
+                if forecast_data:
+                    st.sidebar.success(f"✅ Forecast loaded from {station.name}")
+                    break
                         
+            except requests.exceptions.RequestException as e:
+                st.sidebar.error(f"❌ Network error for {station.name}: {str(e)}")
+            except requests.exceptions.Timeout as e:
+                st.sidebar.error(f"⏰ Timeout for {station.name}: {str(e)}")
             except Exception as e:
-                st.warning(f"Could not fetch forecast data for {station.name}: {str(e)}")
+                st.sidebar.error(f"❌ Error for {station.name}: {str(e)}")
+                
                 # Fill with zeros as fallback
                 for day_idx in range(days_ahead):
                     forecast_data[f'station_{i}_forecast_day_{day_idx}'] = 0.0
                     forecast_data[f'station_{i}_precip_prob_day_{day_idx}'] = 0
                     forecast_data[f'station_{i}_temp_forecast_day_{day_idx}'] = 50.0
         
+        st.sidebar.text(f"📊 Total forecast keys: {len(forecast_data)}")
         return forecast_data
 
     def calculate_forecast_prediction(self, river_config: RiverConfig, current_flow: float,
