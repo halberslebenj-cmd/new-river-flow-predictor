@@ -832,9 +832,44 @@ def main():
         
         prediction_type = st.radio(
             "Choose prediction type:",
-            ["Single Day (Tomorrow)", "Multi-Day Forecast (7 Days)"],
-            help="Single day uses historical data, multi-day uses weather forecast"
+            ["Single Day (Tomorrow)", "Multi-Day Forecast (Manual Input)"],
+            help="Single day uses historical data. Multi-day requires manual weather input."
         )
+        
+        # Manual forecast input for multi-day predictions
+        if prediction_type == "Multi-Day Forecast (Manual Input)":
+            with st.expander("📝 Enter Expected Weather", expanded=True):
+                st.markdown("**Enter expected rainfall for the next 7 days:**")
+                st.markdown("*Check your local weather forecast and enter expected precipitation*")
+                
+                manual_forecast = {}
+                cols = st.columns(4)
+                day_names = ["Tomorrow", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"]
+                
+                for i, day_name in enumerate(day_names):
+                    col_idx = i % 4
+                    if i > 0 and col_idx == 0:
+                        cols = st.columns(4)
+                    
+                    with cols[col_idx]:
+                        manual_rain = st.number_input(
+                            f"{day_name}",
+                            value=0.0,
+                            step=0.1,
+                            format="%.1f",
+                            key=f"manual_forecast_{i}",
+                            help="Expected rainfall in inches"
+                        )
+                        manual_forecast[f'station_0_forecast_day_{i}'] = manual_rain
+                        manual_forecast[f'station_0_precip_prob_day_{i}'] = 70 if manual_rain > 0.1 else 10
+                        manual_forecast[f'station_0_temp_forecast_day_{i}'] = current_temp
+                
+                # Update forecast_data with manual input
+                forecast_data.update(manual_forecast)
+                
+                if any(manual_forecast[f'station_0_forecast_day_{i}'] > 0 for i in range(7)):
+                    total_expected = sum(manual_forecast[f'station_0_forecast_day_{i}'] for i in range(7))
+                    st.success(f"✅ Manual forecast entered: {total_expected:.1f}\" total over 7 days")
         
         # Prediction button
         if st.button("🔮 Generate Flow Prediction", type="primary", use_container_width=True):
@@ -861,7 +896,7 @@ def main():
                 
             else:
                 # Multi-day forecast prediction
-                if forecast_data:
+                if forecast_data and any(forecast_data.get(f'station_0_forecast_day_{i}', 0) > 0 for i in range(7)):
                     predictions = predictor.calculate_forecast_prediction(
                         river_config, current_flow, weather_data, forecast_data, days_ahead=7
                     )
@@ -872,7 +907,7 @@ def main():
                     st.session_state[f'confidence_{selected_river_key}'] = confidence
                     st.session_state[f'prediction_type_{selected_river_key}'] = "forecast"
                 else:
-                    st.error("❌ Cannot create forecast - weather forecast data not available")
+                    st.error("❌ Please enter expected rainfall amounts for multi-day forecast")
     
     with col2:
         st.header("🎯 Prediction Results")
